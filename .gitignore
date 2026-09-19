@@ -1,0 +1,18 @@
+# Ambienti virtuali Python
+venv/
+env/
+
+# File compilati e cache
+__pycache__/
+*.pyc
+
+# File di configurazione dell'IDE locale
+.vscode/
+
+# Dataset e file di grandi dimensioni (evita di caricare il dataset NIDD su GitHub)
+*.csv
+*.pcap
+*.parquet
+
+# File di variabili d'ambiente (per password o token futuri)
+.env
