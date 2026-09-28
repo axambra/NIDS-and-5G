@@ -134,4 +134,4 @@ def avvia_sniffer(stampa_a_video=True):
 
 if __name__ == "__main__":
     # Imposta stampa_a_video=True per il primo test, poi prova con False per confrontare!
-    avvia_sniffer(stampa_a_video=True)
+    avvia_sniffer(stampa_a_video=False)
