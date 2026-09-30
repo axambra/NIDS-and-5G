@@ -1,0 +1,6 @@
+{"timestamp": "2026-09-29T18:35:13.775579", "src_ip": "10.0.0.1", "dst_ip": "NIDS_Interface", "attack_type": "SYN_FLOOD", "severity": "HIGH"}
+{"timestamp": "2026-09-29T18:35:13.775908", "src_ip": "10.0.0.2", "dst_ip": "NIDS_Interface", "attack_type": "PORT_SCAN", "severity": "MEDIUM"}
+{"timestamp": "2026-09-30T19:11:09.811220", "src_ip": "10.152.183.10", "dst_ip": "NIDS_Interface", "attack_type": "PORT_SCAN", "severity": "MEDIUM"}
+{"timestamp": "2026-09-30T19:11:09.831778", "src_ip": "10.1.175.230", "dst_ip": "NIDS_Interface", "attack_type": "PORT_SCAN", "severity": "MEDIUM"}
+{"timestamp": "2026-09-30T19:11:20.996880", "src_ip": "10.255.255.254", "dst_ip": "NIDS_Interface", "attack_type": "ICMP_FLOOD", "severity": "LOW"}
+{"timestamp": "2026-09-30T19:16:59.799552", "src_ip": "127.0.0.1", "dst_ip": "NIDS_Interface", "attack_type": "PORT_SCAN", "severity": "MEDIUM"}

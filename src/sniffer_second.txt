@@ -1,0 +1,365 @@
+import socket
+import struct
+import time
+import threading
+import queue
+import signal
+import os
+from collections import defaultdict
+
+ETH_P_ALL = 3
+SOL_PACKET = 263
+PACKET_STATISTICS = 6
+
+
+class PacketParser:
+    # Strutture pre-compilate a livello di classe per ottimizzare l'unpacking
+    ETH_STRUCT = struct.Struct('! 6s 6s H')
+    IPV4_STRUCT = struct.Struct('! 8x B B 2x 4s 4s')
+    TCP_STRUCT = struct.Struct('! H H L L H')
+    UDP_STRUCT = struct.Struct('! H H 2x H')
+    ICMP_STRUCT = struct.Struct('! B B H')
+
+    @staticmethod
+    def format_mac(bytes_addr):
+        return ':'.join(f'{b:02x}' for b in bytes_addr).upper()
+
+    @staticmethod
+    def unpack_ethernet(data):
+        dest_mac, src_mac, proto = PacketParser.ETH_STRUCT.unpack(data[:14])
+        return (
+            PacketParser.format_mac(dest_mac),
+            PacketParser.format_mac(src_mac),
+            socket.htons(proto),
+            data[14:]
+        )
+
+    @staticmethod
+    def unpack_ipv4(data):
+        version_ihl = data[0]
+        version = version_ihl >> 4
+        header_len = (version_ihl & 15) * 4
+        ttl, proto, src, target = PacketParser.IPV4_STRUCT.unpack(data[:20])
+        return (
+            version,
+            header_len,
+            ttl,
+            proto,
+            '.'.join(map(str, src)),
+            '.'.join(map(str, target)),
+            data[header_len:]
+        )
+
+    @staticmethod
+    def unpack_tcp(data):
+        src_port, dest_port, seq, ack, offset_flags = PacketParser.TCP_STRUCT.unpack(data[:14])
+        offset = (offset_flags >> 12) * 4
+        flags = {
+            "URG": (offset_flags & 32) >> 5,
+            "ACK": (offset_flags & 16) >> 4,
+            "PSH": (offset_flags & 8) >> 3,
+            "RST": (offset_flags & 4) >> 2,
+            "SYN": (offset_flags & 2) >> 1,
+            "FIN": offset_flags & 1
+        }
+        return src_port, dest_port, seq, ack, flags, data[offset:]
+
+    @staticmethod
+    def unpack_udp(data):
+        src_port, dest_port, size = PacketParser.UDP_STRUCT.unpack(data[:8])
+        return src_port, dest_port, size, data[8:]
+
+    @staticmethod
+    def unpack_icmp(data):
+        icmp_type, code, checksum = PacketParser.ICMP_STRUCT.unpack(data[:4])
+        return icmp_type, code, checksum, data[4:]
+
+    @classmethod
+    def parse(cls, raw_data):
+        if len(raw_data) < 14:
+            raise struct.error("Frame Ethernet troncato")
+
+        dest_mac, src_mac, eth_proto, payload = cls.unpack_ethernet(raw_data)
+        parsed = {"eth_proto": eth_proto, "l3_proto": None}
+
+        # Analizziamo solo pacchetti IPv4 (eth_proto == 8)
+        if eth_proto == 8 and len(payload) >= 20:
+            version, ihl, ttl, proto, src_ip, dst_ip, l4_data = cls.unpack_ipv4(payload)
+            parsed.update({
+                "src_ip": src_ip,
+                "dst_ip": dst_ip,
+                "ttl": ttl,
+                "l3_proto": proto
+            })
+
+            if proto == 1 and len(l4_data) >= 4:
+                icmp_type, code, checksum, _ = cls.unpack_icmp(l4_data)
+                parsed.update({"type": "ICMP", "icmp_type": icmp_type, "icmp_code": code})
+
+            elif proto == 6 and len(l4_data) >= 14:
+                src_port, dst_port, seq, ack, flags, _ = cls.unpack_tcp(l4_data)
+                parsed.update({
+                    "type": "TCP",
+                    "src_port": src_port,
+                    "dst_port": dst_port,
+                    "flags": flags
+                })
+
+            elif proto == 17 and len(l4_data) >= 8:
+                src_port, dst_port, size, _ = cls.unpack_udp(l4_data)
+                parsed.update({
+                    "type": "UDP",
+                    "src_port": src_port,
+                    "dst_port": dst_port,
+                    "size": size
+                })
+
+        return parsed
+
+
+class ThreatAnalyzer:
+    def __init__(self, syn_threshold=100):
+        self.lock = threading.Lock()
+        self.syn_threshold = syn_threshold
+        self.syn_per_ip = defaultdict(int)
+        self.sospetti_rilevati = set()
+
+        self.stats = {
+            "processati": 0,
+            "malformati": 0,
+            "tcp": 0,
+            "udp": 0,
+            "icmp": 0,
+            "syn_totali": 0
+        }
+
+    def aggiorna_batch(self, batch_stats, batch_syn_ips):
+        nuovi_allarmi = []
+        with self.lock:
+            for k, v in batch_stats.items():
+                self.stats[k] += v
+
+            # Tracciamento SYN per IP sorgente (base per la detection di SYN Flood)
+            for ip, count in batch_syn_ips.items():
+                self.syn_per_ip[ip] += count
+                if self.syn_per_ip[ip] >= self.syn_threshold and ip not in self.sospetti_rilevati:
+                    self.sospetti_rilevati.add(ip)
+                    nuovi_allarmi.append((ip, self.syn_per_ip[ip]))
+
+        return nuovi_allarmi
+
+    def ottieni_report(self):
+        with self.lock:
+            return dict(self.stats), list(self.sospetti_rilevati)
+
+
+class NetworkSniffer:
+    STATS_STRUCT = struct.Struct('II')
+
+    def __init__(self, num_workers=4, queue_size=100000, batch_size=250, verbose=False):
+        self.num_workers = num_workers
+        self.batch_size = batch_size
+        self.verbose = verbose
+
+        self.packet_queue = queue.Queue(maxsize=queue_size)
+        self.stop_event = threading.Event()
+        self.print_lock = threading.Lock()
+        self.producer_lock = threading.Lock()
+
+        self.parser = PacketParser()
+        self.analyzer = ThreatAnalyzer(syn_threshold=100)
+
+        self.catturati_producer = 0
+        self.persi_coda_piena = 0
+        self.picco_coda = 0
+        self.segnale_arresto = "Nessuno"
+        self.raw_socket = None
+
+    def _signal_handler(self, signum, frame):
+        nome_sig = signal.Signals(signum).name
+        self.segnale_arresto = f"{nome_sig} ({signum})"
+        self.stop_event.set()
+
+    def _ottieni_statistiche_kernel(self):
+        try:
+            stats_raw = self.raw_socket.getsockopt(SOL_PACKET, PACKET_STATISTICS, 8)
+            return self.STATS_STRUCT.unpack(stats_raw)
+        except OSError:
+            return 0, 0
+
+    def _producer_loop(self):
+        catturati_locali = 0
+        persi_locali = 0
+        picco_locale = 0
+
+        while not self.stop_event.is_set():
+            try:
+                raw_data, _ = self.raw_socket.recvfrom(65535)
+                self.packet_queue.put_nowait(raw_data)
+                catturati_locali += 1
+
+                if catturati_locali >= self.batch_size:
+                    q_len = self.packet_queue.qsize()
+                    if q_len > picco_locale:
+                        picco_locale = q_len
+                    with self.producer_lock:
+                        self.catturati_producer += catturati_locali
+                        self.persi_coda_piena += persi_locali
+                        if picco_locale > self.picco_coda:
+                            self.picco_coda = picco_locale
+                    catturati_locali = 0
+                    persi_locali = 0
+
+            except queue.Full:
+                persi_locali += 1
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+        with self.producer_lock:
+            self.catturati_producer += catturati_locali
+            self.persi_coda_piena += persi_locali
+            if picco_locale > self.picco_coda:
+                self.picco_coda = picco_locale
+
+    def _consumer_worker(self, worker_id):
+        local_stats = {"processati": 0, "malformati": 0, "tcp": 0, "udp": 0, "icmp": 0, "syn_totali": 0}
+        local_syn_ips = defaultdict(int)
+
+        while not self.stop_event.is_set() or not self.packet_queue.empty():
+            try:
+                raw_data = self.packet_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            log_msg = None
+            try:
+                pkt = self.parser.parse(raw_data)
+                pkt_type = pkt.get("type")
+
+                if pkt_type == "TCP":
+                    local_stats["tcp"] += 1
+                    flags = pkt["flags"]
+                    if flags["SYN"] == 1 and flags["ACK"] == 0:
+                        local_stats["syn_totali"] += 1
+                        local_syn_ips[pkt["src_ip"]] += 1
+                    if self.verbose:
+                        log_msg = (f"[W-{worker_id}] [TCP] {pkt['src_ip']}:{pkt['src_port']} -> "
+                                   f"{pkt['dst_ip']}:{pkt['dst_port']} | SYN:{flags['SYN']} ACK:{flags['ACK']}")
+
+                elif pkt_type == "UDP":
+                    local_stats["udp"] += 1
+                    if self.verbose:
+                        log_msg = (f"[W-{worker_id}] [UDP] {pkt['src_ip']}:{pkt['src_port']} -> "
+                                   f"{pkt['dst_ip']}:{pkt['dst_port']} | Dim:{pkt['size']}")
+
+                elif pkt_type == "ICMP":
+                    local_stats["icmp"] += 1
+                    if self.verbose:
+                        log_msg = f"[W-{worker_id}] [ICMP] {pkt['src_ip']} -> {pkt['dst_ip']} | Tipo:{pkt['icmp_type']}"
+
+                local_stats["processati"] += 1
+
+            except struct.error:
+                local_stats["malformati"] += 1
+            finally:
+                self.packet_queue.task_done()
+
+            # Flush del batch verso il ThreatAnalyzer
+            if local_stats["processati"] >= self.batch_size:
+                allarmi = self.analyzer.aggiorna_batch(local_stats, local_syn_ips)
+                for ip, count in allarmi:
+                    with self.print_lock:
+                        print(f"[ALERT NIDS] Possibile SYN Flood da {ip} ({count} pacchetti SYN rilevati)")
+                for k in local_stats:
+                    local_stats[k] = 0
+                local_syn_ips.clear()
+
+            if log_msg:
+                with self.print_lock:
+                    print(log_msg)
+
+        # Flush finale alla chiusura del worker
+        self.analyzer.aggiorna_batch(local_stats, local_syn_ips)
+
+    def _monitor_loop(self, intervallo=2.0):
+        ultimo_proc = 0
+        while not self.stop_event.wait(timeout=intervallo):
+            stats, _ = self.analyzer.ottieni_report()
+            proc = stats["processati"]
+            pps = (proc - ultimo_proc) / intervallo
+            ultimo_proc = proc
+            in_coda = self.packet_queue.qsize()
+
+            with self.print_lock:
+                print(f"[MONITOR] Throughput: {pps:7.1f} pkt/s | In coda: {in_coda:5d} (Picco: {self.picco_coda}) | Tot: {proc}")
+
+    def start(self):
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+
+        try:
+            self.raw_socket = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(ETH_P_ALL))
+            self.raw_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+            self.raw_socket.settimeout(0.5)
+        except PermissionError:
+            print("Errore: permessi insufficienti, esegui con sudo.")
+            return
+
+        rcvbuf = self.raw_socket.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        pid = os.getpid()
+        print(f"[*] NetworkSniffer OOP avviato (PID: {pid}) | Worker: {self.num_workers} | SO_RCVBUF: {rcvbuf // 1024} KB")
+        print("[*] Premi CTRL+C (SIGINT) o invia SIGTERM per terminare.\n")
+
+        start_time = time.time()
+
+        producer_thread = threading.Thread(target=self._producer_loop, name="Producer", daemon=True)
+        workers = [
+            threading.Thread(target=self._consumer_worker, args=(i,), name=f"Worker-{i}", daemon=True)
+            for i in range(1, self.num_workers + 1)
+        ]
+        monitor_thread = threading.Thread(target=self._monitor_loop, name="Monitor", daemon=True)
+
+        producer_thread.start()
+        for w in workers:
+            w.start()
+        monitor_thread.start()
+
+        try:
+            while not self.stop_event.is_set():
+                self.stop_event.wait(timeout=0.5)
+        finally:
+            print(f"\n[!] Arresto richiesto ({self.segnale_arresto}). Svuotamento coda in corso...")
+            producer_thread.join(timeout=2.0)
+            for w in workers:
+                w.join(timeout=3.0)
+
+            durata = time.time() - start_time
+            tp_packets, tp_drops = self._ottieni_statistiche_kernel()
+            drop_rate = (tp_drops / tp_packets * 100) if tp_packets > 0 else 0.0
+
+            stats, sospetti = self.analyzer.ottieni_report()
+            pps_medio = stats["processati"] / durata if durata > 0 else 0.0
+            self.raw_socket.close()
+
+            print("\n--- REPORT FINALE NIDS (ARCHITETTURA OOP) ---")
+            print(f"Segnale arresto        : {self.segnale_arresto}")
+            print(f"Durata sessione        : {durata:.2f} s")
+            print(f"Throughput medio       : {pps_medio:.1f} pkt/s")
+            print(f"Catturati (Producer)   : {self.catturati_producer}")
+            print(f"Processati (Consumers) : {stats['processati']} (Malformati: {stats['malformati']})")
+            print(f"  - TCP                : {stats['tcp']} (SYN puri: {stats['syn_totali']})")
+            print(f"  - UDP                : {stats['udp']}")
+            print(f"  - ICMP               : {stats['icmp']}")
+            print(f"IP Sospetti (SYN Flood): {len(sospetti)} -> {sospetti if sospetti else 'Nessuno'}")
+            print(f"Picco occupazione coda : {self.picco_coda} / {self.packet_queue.maxsize}")
+            print(f"Drop coda piena        : {self.persi_coda_piena}")
+            print(f"Pacchetti kernel       : {tp_packets}")
+            print(f"Drop kernel            : {tp_drops} ({drop_rate:.2f}%)")
+            print("---------------------------------------------")
+
+
+if __name__ == "__main__":
+    sniffer = NetworkSniffer(num_workers=4, verbose=False)
+    sniffer.start()

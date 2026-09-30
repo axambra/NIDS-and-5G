@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NetSniffer | Enterprise SOC</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Barra Laterale (System Health) -->
+        <aside class="sidebar">
+            <div class="brand">
+                <span class="shield-icon">🛡️</span>
+                <h2>NetSniffer<br><small>Enterprise SOC</small></h2>
+            </div>
+            
+            <div class="system-health">
+                <h4>Stato Sistema</h4>
+                <div class="health-metric">
+                    <span>Motore NIDS</span>
+                    <span class="badge active">ONLINE</span>
+                </div>
+                <div class="health-metric">
+                    <span>Interfaccia</span>
+                    <span class="mono-text">eth0</span>
+                </div>
+                <div class="health-metric">
+                    <span>CPU Usage</span>
+                    <span id="sys-cpu">14%</span>
+                </div>
+                <div class="health-metric">
+                    <span>RAM Usage</span>
+                    <span id="sys-ram">2.1 GB</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Contenuto Principale -->
+        <main class="main-content">
+            <!-- Topbar -->
+            <header class="topbar">
+                <div class="page-title">
+                    <h1>Traffico di Rete Globale</h1>
+                    <p>Monitoraggio in tempo reale degli eventi di sicurezza</p>
+                </div>
+                <div class="system-clock">
+                    <span id="live-clock">00:00:00</span>
+                    <span class="date" id="live-date">YYYY-MM-DD</span>
+                </div>
+            </header>
+
+            <!-- KPI Cards -->
+            <section class="kpi-grid">
+                <article class="kpi-card">
+                    <div class="kpi-header">Pacchetti Analizzati</div>
+                    <div class="kpi-value" id="total-packets">0</div>
+                    <div class="kpi-trend">Dall'avvio del sistema</div>
+                </article>
+                <article class="kpi-card">
+                    <div class="kpi-header">Eventi Sospetti</div>
+                    <div class="kpi-value warning" id="suspicious-traffic">0</div>
+                    <div class="kpi-trend">Severità Media</div>
+                </article>
+                <article class="kpi-card">
+                    <div class="kpi-header">Minacce Critiche</div>
+                    <div class="kpi-value danger" id="blocked-ips">0</div>
+                    <div class="kpi-trend">Azione richiesta</div>
+                </article>
+                <article class="kpi-card highlight-card">
+                    <div class="kpi-header">Vettore Frequente</div>
+                    <div class="kpi-value" id="top-threat">N/A</div>
+                    <div class="kpi-trend">Nelle ultime 24h</div>
+                </article>
+            </section>
+
+            <!-- Tabella Log -->
+            <section class="log-panel">
+                <div class="panel-header">
+                    <h3>Registro Eventi (Live Stream)</h3>
+                    <div class="panel-actions">
+                        <button class="btn btn-outline">Esporta CSV</button>
+                    </div>
+                </div>
+                <div class="table-responsive">
+                    <table id="network-logs">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>IP Sorgente</th>
+                                <th>IP Destinazione</th>
+                                <th>Tipologia Evento</th>
+                                <th>Severità</th>
+                            </tr>
+                        </thead>
+                        <tbody id="log-tbody">
+                            <!-- Popolato da JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
